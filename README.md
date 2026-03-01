@@ -219,6 +219,619 @@ Make sure to replace **'ec2-user'** with your actual username if it's different.
 After completing these steps, try inputting your data again, and you should receive a success message.
 
 
+# AWS 3-Tier Architecture – Passport Application System modified with RDS
+
+# 📌 Overview
+
+This project implements a complete 3-tier architecture on AWS using:
+
+- **Presentation Tier** → Apache (EC2)
+
+- **Logic Tier** → Flask API (EC2)
+
+- **Data Tier** → MariaDB (RDS)
+
+The application allows users to submit a passport application form through a web interface. The data is stored securely in an **RDS database**.
+
+## 🏗 Architecture Flow
+```java
+Browser
+   ↓
+Presentation Tier (Apache - Port 80)
+   ↓ Reverse Proxy
+Logic Tier (Flask - Port 5000 - Private IP)
+   ↓
+RDS MariaDB (Port 3306 - Private)
+```
+
+
+## PHASE 1 — CREATE SECURITY GROUPS (Do This First)
+
+Go to **EC2** → **Security Groups** → **Create 3 groups**.
+
+### 1️) Presentation Security Group
+
+**Name**: ```presentation-sg```
+
+**Inbound Rules**:
+
+- HTTP (80) → 0.0.0.0/0
+
+- SSH (22) → Your IP only
+
+**Outbound**:
+
+Allow all (default)
+
+### 2️) Logic Security Group
+
+**Name**: logic-sg
+
+**Inbound**:
+
+Port 5000 → Source = `presentation-sg`
+
+SSH (22) → Your IP only
+
+**Outbound**:
+
+Allow all
+
+### 3️) RDS Security Group
+
+**Name**: `rds-sg`
+
+**Inbound**:
+
+MySQL/Aurora (3306) → Source = `logic-sg`
+
+**Outbound**:
+
+Default
+
+## PHASE 2 — CREATE RDS (MariaDB)
+
+Go to **RDS** → **Create database**
+
+- Engine: MariaDB
+- Template: Free tier
+- DB Identifier: `flask-mariadb-db`
+- Master Username: `admin`
+- Password: `choose strong password`
+
+**Connectivity:**
+
+- VPC: default
+- Public access: **NO**
+- Security Group: select `rds-sg`
+
+**Database name**:
+
+- `flaskdb`
+
+Do not connect to ec2 compute service. You will do it manually
+
+Click Create.
+
+Wait until status = **Available**.
+
+Copy the **RDS endpoint**.
+
+## PHASE 3 — CREATE EC2 INSTANCES
+
+### 4️) Create Logic Tier Instance
+
+- Amazon Linux 2023
+- Security Group: `logic-sg`
+
+Launch.
+
+After running:
+Copy its **Private IP**.
+
+### 5️) Create Presentation Tier Instance
+
+- Amazon Linux 2023
+- Security Group: presentation-sg
+
+Launch.
+
+Copy its **Public IP**.
+
+## PHASE 4 — CONFIGURE LOGIC TIER (Flask Server)
+
+### 6️) SSH into Logic Tier
+
+### 7️) Install Required Packages
+
+```bash
+sudo dnf update -y
+sudo dnf install python3 -y
+sudo dnf install python3-pip -y
+sudo dnf install mariadb105 -y
+pip3 install flask flask-cors mysql-connector-python
+```
+
+### 8️) Create Flask App
+
+```bash
+nano app.py
+```
+Paste:
+
+```python
+import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import mysql.connector
+from mysql.connector import Error
+
+# -------------------------
+# Flask app setup
+# -------------------------
+app = Flask(__name__)
+CORS(app)  # Allow cross-origin requests from Presentation Tier
+
+# -------------------------
+# Database connection
+# -------------------------
+def create_connection():
+    """
+    Create and return a connection to the RDS MariaDB database.
+    Environment variables must be set:
+    DB_HOST, DB_USER, DB_PASSWORD, DB_NAME
+    """
+    try:
+        connection = mysql.connector.connect(
+            host=os.environ.get("DB_HOST"),
+            user=os.environ.get("DB_USER"),
+            password=os.environ.get("DB_PASSWORD"),
+            database=os.environ.get("DB_NAME")
+        )
+        return connection
+    except Error as e:
+        print(f"Database connection failed: {e}")
+        return None
+
+# -------------------------
+# Submit route
+# -------------------------
+@app.route('/submit', methods=['POST'])
+def submit_form():
+    """
+    Handles form submission from Presentation Tier.
+    Expects: firstName, lastName, dob, email in form data.
+    Returns JSON success/failure.
+    """
+    try:
+        first_name = request.form.get('firstName')
+        last_name = request.form.get('lastName')
+        dob = request.form.get('dob')
+        email = request.form.get('email')
+
+        # Validate input
+        if not all([first_name, last_name, dob, email]):
+            return jsonify({"success": False, "message": "All fields are required"}), 400
+
+        # Connect to DB
+        connection = create_connection()
+        if not connection:
+            return jsonify({"success": False, "message": "Database connection failed"}), 500
+
+        cursor = connection.cursor()
+        insert_query = """
+            INSERT INTO applications (first_name, last_name, dob, email)
+            VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(insert_query, (first_name, last_name, dob, email))
+        connection.commit()
+        cursor.close()
+        connection.close()
+
+        return jsonify({"success": True, "message": "Application submitted successfully"}), 200
+
+    except Exception as e:
+        print(f"Error processing request: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+# -------------------------
+# Health check route (optional)
+# -------------------------
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "Logic tier running"}), 200
+
+# -------------------------
+# Main
+# -------------------------
+if __name__ == "__main__":
+    # Flask will listen on port 5000 for requests from Presentation EC2
+    app.run(host="0.0.0.0", port=5000, debug=False)
+```
+
+### 9️) Configure Environment Variables (Temporary)
+
+```bash
+export DB_HOST=your-rds-endpoint
+export DB_USER=admin
+export DB_PASSWORD=yourpassword
+export DB_NAME=flaskdb
+```
+
+### 10) Create Table in RDS
+
+Connect:
+
+```bash
+mysql -h your-db-endpoint -P 3306 -u admin -p --ssl
+```
+Then create Database and a Table:
+
+```sql
+USE flaskdb;
+```
+
+```sql
+CREATE TABLE applications (
+   id INT AUTO_INCREMENT PRIMARY KEY,
+   first_name VARCHAR(100),
+   last_name VARCHAR(100),
+   dob DATE,
+   email VARCHAR(100)
+);
+```
+Exit.
+
+### 11) Run Flask
+
+```bash
+python3 app.py
+```
+
+### 12️) Create systemd Service
+
+```bash
+sudo nano /etc/systemd/system/flaskapp.service
+```
+paste:
+
+```ini
+[Unit]
+Description=Flask App
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user
+ExecStart=/usr/bin/python3 /home/ec2-user/app.py
+Environment="DB_HOST=your-rds-endpoint"
+Environment="DB_USER=admin"
+Environment="DB_PASSWORD=yourpassword"
+Environment="DB_NAME=flaskdb"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+- Replace the `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` with the actual credentials
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start flaskapp
+sudo systemctl enable flaskapp
+```
+Check:
+
+```bash
+sudo systemctl status flaskapp
+```
+
+## PHASE 5 — CONFIGURE PRESENTATION TIER (Apache + Reverse Proxy)
+
+### 13️) SSH into Presentation Tier
+
+### 14️) Install Apache 
+
+```bash
+sudo yum update -y
+sudo yum install httpd -y
+```
+
+### 15️) Enable Apache
+
+```bash
+sudo systemctl start httpd
+sudo systemctl enable httpd
+```
+
+### 16️) Configure Reverse Proxy
+
+```bash
+sudo nano /etc/httpd/conf/httpd.conf
+```
+
+- Scroll to the bottom.
+- Add:
+
+```apache
+<VirtualHost *:80>
+    DocumentRoot /var/www/html
+
+    # Enable proxy modules (make sure they exist)
+    LoadModule proxy_module modules/mod_proxy.so
+    LoadModule proxy_http_module modules/mod_proxy_http.so
+
+    # Proxy /submit to Logic EC2 Flask app
+    ProxyPass /submit http://<LOGIC_PRIVATE_IP>:5000/submit
+    ProxyPassReverse /submit http://<LOGIC_PRIVATE_IP>:5000/submit
+
+    # Optional: allow CORS
+    <Location /submit>
+        Require all granted
+    </Location>
+</VirtualHost>
+```
+- Replace LOGIC_PRIVATE_IP.
+
+Save.
+
+Restart Apache:
+
+```bash
+sudo systemctl restart httpd
+```
+## PHASE 6 — ADD HTML FILE
+
+### 17️) Add HTML File
+
+```bash
+sudo nano /var/www/html/index.html
+```
+
+Paste:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Passport Application Form</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f6f9;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 500px;
+            margin: 50px auto;
+            background: #ffffff;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        h2 {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-top: 15px;
+            font-weight: bold;
+        }
+
+        input {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+
+        button {
+            margin-top: 20px;
+            width: 100%;
+            padding: 10px;
+            background-color: #0073e6;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #005bb5;
+        }
+
+        .error {
+            color: red;
+            font-size: 13px;
+        }
+
+        .success {
+            color: green;
+            text-align: center;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Passport Application Form</h2>
+
+    <!-- Notice: No more public IP here -->
+    <form id="passportForm" method="POST">
+
+        <label for="firstName">First Name</label>
+        <input type="text" id="firstName" name="firstName">
+        <span id="firstNameError" class="error"></span>
+
+        <label for="lastName">Last Name</label>
+        <input type="text" id="lastName" name="lastName">
+        <span id="lastNameError" class="error"></span>
+
+        <label for="dob">Date of Birth</label>
+        <input type="date" id="dob" name="dob">
+        <span id="dobError" class="error"></span>
+
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email">
+        <span id="emailError" class="error"></span>
+
+        <button type="submit">Submit Application</button>
+
+        <div id="responseMessage"></div>
+
+    </form>
+</div>
+
+<script>
+document.getElementById("passportForm").addEventListener("submit", function(event) {
+    event.preventDefault();
+
+    if (validateForm()) {
+        submitForm();
+    }
+});
+
+function validateForm() {
+    let isValid = true;
+
+    document.querySelectorAll(".error").forEach(el => el.innerText = "");
+
+    const firstName = document.getElementById("firstName").value.trim();
+    const lastName = document.getElementById("lastName").value.trim();
+    const dob = document.getElementById("dob").value.trim();
+    const email = document.getElementById("email").value.trim();
+
+    if (!firstName) {
+        document.getElementById("firstNameError").innerText = "First name is required";
+        isValid = false;
+    }
+
+    if (!lastName) {
+        document.getElementById("lastNameError").innerText = "Last name is required";
+        isValid = false;
+    }
+
+    if (!dob) {
+        document.getElementById("dobError").innerText = "Date of birth is required";
+        isValid = false;
+    }
+
+    if (!email) {
+        document.getElementById("emailError").innerText = "Email is required";
+        isValid = false;
+    } else if (!isValidEmail(email)) {
+        document.getElementById("emailError").innerText = "Invalid email format";
+        isValid = false;
+    }
+
+    return isValid;
+}
+
+function isValidEmail(email) {
+    const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return regex.test(email);
+}
+
+function submitForm() {
+    const formData = new FormData(document.getElementById("passportForm"));
+
+    /* Notice this is now a RELATIVE PATH */
+    fetch('/submit', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        const responseDiv = document.getElementById("responseMessage");
+
+        if (data.success) {
+            responseDiv.className = "success";
+            responseDiv.innerText = "Application submitted successfully!";
+            document.getElementById("passportForm").reset();
+        } else {
+            responseDiv.className = "error";
+            responseDiv.innerText = "Error: " + data.message;
+        }
+    })
+    .catch(error => {
+        document.getElementById("responseMessage").className = "error";
+        document.getElementById("responseMessage").innerText = "Network error occurred.";
+        console.error(error);
+    });
+}
+</script>
+
+</body>
+</html>
+```
+
+Save.
+
+Restart Apache:
+
+```bash
+sudo systemctl restart httpd
+```
+
+## PHASE 7 — TEST FULL FLOW
+
+Open browser:
+
+```bash
+http://PRESENTATION_PUBLIC_IP
+```
+
+Fill and `Submit` form.
+
+Flow:
+
+```scss
+Presentation (80)
+→ Apache proxy
+→ Logic private IP (5000)
+→ RDS (3306)
+```
+
+## PHASE 8 — VERIFY DATA
+
+- SSH into Logic Tier and connect to RDS:
+
+```bash
+mysql -h your-rds-endpoint -P 3306 -u admin -p --ssl
+```
+
+After logging in, run:
+
+```sql
+USE flaskdb;
+```
+
+Then:
+
+```sql
+SELECT * FROM applications;
+```
+
+# Boom!!!. You should see your submitted record. 
+
+
+
+
+
 **PLEASE DO WELL TO REACH ME IN CASE YOU HAVE ANY TROUBLES. I WILL BE VERY GLAD TO HELP**
 
      

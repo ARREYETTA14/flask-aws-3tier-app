@@ -219,6 +219,11 @@ Make sure to replace **'ec2-user'** with your actual username if it's different.
 After completing these steps, try inputting your data again, and you should receive a success message.
 
 
+
+
+
+
+
 # AWS 3-Tier Architecture – Passport Application System modified with RDS
 
 # 📌 Overview
